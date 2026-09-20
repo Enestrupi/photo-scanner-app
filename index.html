@@ -274,6 +274,32 @@
     justify-content: flex-end;
     gap: 0.6rem;
   }
+  select {
+    font: inherit;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--ink);
+  }
+  .field-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  .warn-note {
+    font-size: 0.8rem;
+    color: #8a5a1f;
+    background: #fdf3e3;
+    border: 1px solid #f0dcb2;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    margin-top: 0.75rem;
+    display: none;
+  }
+  .warn-note.show { display: block; }
 </style>
 </head>
 <body>
@@ -301,6 +327,26 @@
         <input type="checkbox" id="grayscaleToggle">
         Convert to grayscale
       </label>
+      <label class="toggle">
+        <input type="checkbox" id="whitenToggle">
+        Clean background to white
+      </label>
+    </div>
+
+    <div class="controls">
+      <div class="field-row">
+        Output size
+        <select id="resizeSelect">
+          <option value="1200">Small — max 1200px</option>
+          <option value="2000" selected>Standard — max 2000px</option>
+          <option value="3000">Large — max 3000px</option>
+          <option value="0">Original size (no resize)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="warn-note" id="largeBatchWarn">
+      Large batch (300+ photos) — processing and PDF export may take a few minutes and use significant memory. Consider using "Small" or "Standard" size to keep things smooth, or export in two halves if the browser slows down.
     </div>
 
     <div class="controls">
@@ -378,6 +424,9 @@
   const progressText = document.getElementById('progressText');
   const enhanceToggle = document.getElementById('enhanceToggle');
   const grayscaleToggle = document.getElementById('grayscaleToggle');
+  const whitenToggle = document.getElementById('whitenToggle');
+  const resizeSelect = document.getElementById('resizeSelect');
+  const largeBatchWarn = document.getElementById('largeBatchWarn');
   const pendingGrid = document.getElementById('pendingGrid');
   const pendingCount = document.getElementById('pendingCount');
 
@@ -442,6 +491,7 @@
     }
     renderPendingGrid();
     updateButtons();
+    largeBatchWarn.classList.toggle('show', items.length >= 300);
   }
 
   function renderPendingGrid() {
@@ -481,6 +531,7 @@
     grid.innerHTML = '';
     pendingGrid.innerHTML = '';
     fileInput.value = '';
+    largeBatchWarn.classList.remove('show');
     updateButtons();
   });
 
@@ -656,14 +707,14 @@
     return canvas.toDataURL('image/jpeg', 0.9);
   }
 
-  function enhance(canvas, ctx, doEnhance, doGray) {
-    if (!doEnhance && !doGray) return;
+  function enhance(canvas, ctx, doEnhance, doGray, doWhiten) {
+    if (!doEnhance && !doGray && !doWhiten) return;
     const w = canvas.width, h = canvas.height;
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
     if (doEnhance) {
-      // simple auto-levels: stretch histogram between 2nd and 98th percentile
+      // simple auto-levels: stretch histogram between observed min/max luminance
       let min = 255, max = 0;
       for (let i = 0; i < data.length; i += 4) {
         const lum = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
@@ -678,6 +729,24 @@
           v = ((v - min) / range) * 255;
           v = (v - 128) * contrastBoost + 128;
           data[i+c] = Math.max(0, Math.min(255, v));
+        }
+      }
+    }
+
+    if (doWhiten) {
+      // push light/mid-light pixels toward pure white, leaving darker
+      // foreground (text, ink, subjects) mostly intact — a soft "clean page" look
+      const whitePoint = 205; // luminance at/above this becomes fully white
+      const softStart = 130;  // luminance below this is left alone
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        if (lum >= whitePoint) {
+          data[i] = data[i+1] = data[i+2] = 255;
+        } else if (lum > softStart) {
+          const t = (lum - softStart) / (whitePoint - softStart); // 0..1
+          for (let c = 0; c < 3; c++) {
+            data[i+c] = data[i+c] + t * (255 - data[i+c]);
+          }
         }
       }
     }
@@ -701,6 +770,8 @@
 
     const doEnhance = enhanceToggle.checked;
     const doGray = grayscaleToggle.checked;
+    const doWhiten = whitenToggle.checked;
+    const maxDim = parseInt(resizeSelect.value, 10); // 0 means "original size"
     const total = items.length;
 
     for (let i = 0; i < total; i++) {
@@ -710,9 +781,8 @@
         const box = item.cropBox || { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
 
         const canvas = document.createElement('canvas');
-        const maxDim = 2000;
         let w = box.w, h = box.h;
-        if (Math.max(w, h) > maxDim) {
+        if (maxDim > 0 && Math.max(w, h) > maxDim) {
           const scale = maxDim / Math.max(w, h);
           w = Math.round(w * scale);
           h = Math.round(h * scale);
@@ -721,7 +791,7 @@
         canvas.height = h;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, box.x, box.y, box.w, box.h, 0, 0, w, h);
-        enhance(canvas, ctx, doEnhance, doGray);
+        enhance(canvas, ctx, doEnhance, doGray, doWhiten);
 
         const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
         processedPages.push(dataUrl);
